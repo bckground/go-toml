@@ -17,6 +17,7 @@ func TestTOMLTest_Invalid(t *testing.T) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			input := testgenInvalidCases[name]
@@ -43,6 +44,7 @@ func TestTOMLTest_Valid(t *testing.T) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			input := testgenValidCases[name]

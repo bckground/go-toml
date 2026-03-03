@@ -180,29 +180,33 @@ func generateAST(validCases []testCase) []byte {
 	buf.WriteString("\treturn ref\n")
 	buf.WriteString("}\n\n")
 
+	// withComment helper function
+	fmt.Fprintf(&buf, "func withComment(b *%sBuilder, ref %sReference, comments ...[]byte) %sReference {\n", qual, qual, qual)
+	buf.WriteString("\tcurrent := ref\n")
+	buf.WriteString("\tfor _, data := range comments {\n")
+	fmt.Fprintf(&buf, "\t\tc := b.Push(%sNode{Kind: %sComment, Data: data})\n", qual, qual)
+	buf.WriteString("\t\tb.AttachComment(current, c)\n")
+	buf.WriteString("\t\tcurrent = c\n")
+	buf.WriteString("\t}\n")
+	buf.WriteString("\treturn ref\n")
+	buf.WriteString("}\n\n")
+
 	// AST cases map
 	fmt.Fprintf(&buf, "var testgenASTCases = map[string]func(b *%sBuilder) []%sReference{\n", qual, qual)
 
 	var p unstable.Parser
+	p.KeepComments = true
 	for _, c := range validCases {
 		p.Reset([]byte(c.Input))
 
-		var exprs []string
+		fmt.Fprintf(&buf, "\t%s: func(b *%sBuilder) []%sReference {\n", strconv.Quote(c.Name), qual, qual)
+		fmt.Fprintf(&buf, "\t\treturn []%sReference{\n", qual)
 		for p.NextExpression() {
-			expr := p.Expression()
-			var exprBuf strings.Builder
-			emitTreeCall(expr, 3, qual, &exprBuf)
-			exprs = append(exprs, exprBuf.String())
+			emitNode(p.Expression(), 3, qual, &buf)
+			buf.WriteString(",\n")
 		}
 		if err := p.Error(); err != nil {
 			log.Fatalf("failed to parse %s: %s", c.Name, err)
-		}
-
-		fmt.Fprintf(&buf, "\t%s: func(b *%sBuilder) []%sReference {\n", strconv.Quote(c.Name), qual, qual)
-		fmt.Fprintf(&buf, "\t\treturn []%sReference{\n", qual)
-		for _, e := range exprs {
-			buf.WriteString(e)
-			buf.WriteString(",\n")
 		}
 		buf.WriteString("\t\t}\n")
 		buf.WriteString("\t},\n")
@@ -213,24 +217,55 @@ func generateAST(validCases []testCase) []byte {
 	return buf.Bytes()
 }
 
-func emitTreeCall(node *unstable.Node, indent int, qual string, buf *strings.Builder) {
+// collectCommentChain returns the Data of each trailing comment in the chain.
+func collectCommentChain(node *unstable.Node) [][]byte {
+	var comments [][]byte
+	c := node.Comment()
+	for c != nil {
+		comments = append(comments, c.Data)
+		c = c.Comment()
+	}
+	return comments
+}
+
+// emitNode emits a nested tree expression for a node. If the node has trailing
+// comments, it wraps the tree call in withComment(...).
+func emitNode(node *unstable.Node, indent int, qual string, buf *bytes.Buffer) {
 	prefix := strings.Repeat("\t", indent)
+	comments := collectCommentChain(node)
 
 	buf.WriteString(prefix)
+	if len(comments) > 0 {
+		buf.WriteString("withComment(b, ")
+	}
+	emitTree(node, indent, qual, buf)
+	for _, c := range comments {
+		buf.WriteString(", []byte(")
+		buf.WriteString(strconv.Quote(string(c)))
+		buf.WriteString(")")
+	}
+	if len(comments) > 0 {
+		buf.WriteString(")")
+	}
+}
+
+// emitTree emits tree(b, Node{...}, children...) without a leading prefix.
+// The caller is responsible for writing the prefix before calling this.
+func emitTree(node *unstable.Node, indent int, qual string, buf *bytes.Buffer) {
+	prefix := strings.Repeat("\t", indent)
+
 	buf.WriteString("tree(b, ")
 	buf.WriteString(qual)
 	buf.WriteString("Node{Kind: ")
 	buf.WriteString(qual)
 	buf.WriteString(node.Kind.String())
-
-	if len(node.Data) > 0 {
+	if node.Data != nil {
 		buf.WriteString(", Data: []byte(")
 		buf.WriteString(strconv.Quote(string(node.Data)))
 		buf.WriteString(")")
 	}
 	buf.WriteString("}")
 
-	// Collect children
 	var children []*unstable.Node
 	it := node.Children()
 	for it.Next() {
@@ -244,7 +279,7 @@ func emitTreeCall(node *unstable.Node, indent int, qual string, buf *strings.Bui
 
 	for _, child := range children {
 		buf.WriteString(",\n")
-		emitTreeCall(child, indent+1, qual, buf)
+		emitNode(child, indent+1, qual, buf)
 	}
 	buf.WriteString(",\n")
 	buf.WriteString(prefix)

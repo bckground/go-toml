@@ -2,6 +2,7 @@ package unstable
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -9,418 +10,170 @@ import (
 	"github.com/pelletier/go-toml/v2/internal/assert"
 )
 
-func TestParser_AST_Numbers(t *testing.T) {
-	examples := []struct {
-		desc  string
-		input string
-		kind  Kind
-		err   bool
-	}{
-		{
-			desc:  "integer just digits",
-			input: `1234`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer zero",
-			input: `0`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer sign",
-			input: `+99`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer hex uppercase",
-			input: `0xDEADBEEF`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer hex lowercase",
-			input: `0xdead_beef`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer octal",
-			input: `0o01234567`,
-			kind:  Integer,
-		},
-		{
-			desc:  "integer binary",
-			input: `0b11010110`,
-			kind:  Integer,
-		},
-		{
-			desc:  "float zero",
-			input: `0.0`,
-			kind:  Float,
-		},
-		{
-			desc:  "float positive zero",
-			input: `+0.0`,
-			kind:  Float,
-		},
-		{
-			desc:  "float negative zero",
-			input: `-0.0`,
-			kind:  Float,
-		},
-		{
-			desc:  "float pi",
-			input: `3.1415`,
-			kind:  Float,
-		},
-		{
-			desc:  "float negative",
-			input: `-0.01`,
-			kind:  Float,
-		},
-		{
-			desc:  "float signed exponent",
-			input: `5e+22`,
-			kind:  Float,
-		},
-		{
-			desc:  "float exponent lowercase",
-			input: `1e06`,
-			kind:  Float,
-		},
-		{
-			desc:  "float exponent uppercase",
-			input: `-2E-2`,
-			kind:  Float,
-		},
-		{
-			desc:  "float fractional with exponent",
-			input: `6.626e-34`,
-			kind:  Float,
-		},
-		{
-			desc:  "float underscores",
-			input: `224_617.445_991_228`,
-			kind:  Float,
-		},
-		{
-			desc:  "inf",
-			input: `inf`,
-			kind:  Float,
-		},
-		{
-			desc:  "inf negative",
-			input: `-inf`,
-			kind:  Float,
-		},
-		{
-			desc:  "inf positive",
-			input: `+inf`,
-			kind:  Float,
-		},
-		{
-			desc:  "nan",
-			input: `nan`,
-			kind:  Float,
-		},
-		{
-			desc:  "nan negative",
-			input: `-nan`,
-			kind:  Float,
-		},
-		{
-			desc:  "nan positive",
-			input: `+nan`,
-			kind:  Float,
-		},
+func compareNodes(t *testing.T, expected, actual *Node) {
+	t.Helper()
+
+	if expected == nil && actual == nil {
+		return
+	}
+	if expected == nil {
+		t.Fatalf("expected nil node but got %s", actual.Kind)
+	}
+	if actual == nil {
+		t.Fatalf("expected %s node but got nil", expected.Kind)
+	}
+	assert.Equal(t, expected.Kind, actual.Kind)
+	assert.Equal(t, expected.Data, actual.Data)
+
+	eIt := expected.Children()
+	aIt := actual.Children()
+	idx := 0
+	for eIt.Next() {
+		if !aIt.Next() {
+			t.Fatalf("child %d: expected more children", idx)
+		}
+		compareNodes(t, eIt.Node(), aIt.Node())
+		idx++
+	}
+	if aIt.Next() {
+		t.Fatalf("child %d: unexpected extra child", idx)
 	}
 
-	for _, e := range examples {
-		e := e
-		t.Run(e.desc, func(t *testing.T) {
-			p := Parser{}
-			p.Reset([]byte(`A = ` + e.input))
-			p.NextExpression()
-			err := p.Error()
-			if e.err {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
+	compareNodes(t, expected.Comment(), actual.Comment())
+}
 
-				expected := astNode{
-					Kind: KeyValue,
-					Children: []astNode{
-						{Kind: e.kind, Data: []byte(e.input)},
-						{Kind: Key, Data: []byte(`A`)},
-					},
+func TestParser_AST(t *testing.T) {
+	names := make([]string, 0, len(testgenASTCases))
+	for name := range testgenASTCases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			input, ok := testgenValidCases[name]
+			if !ok {
+				t.Fatalf("no TOML input for %s", name)
+			}
+
+			var p Parser
+			p.KeepComments = true
+			p.Reset([]byte(input))
+
+			b := NewBuilder()
+			refs := testgenASTCases[name](b)
+
+			idx := 0
+			for p.NextExpression() {
+				if idx >= len(refs) {
+					t.Fatal("parser produced more expressions than expected")
 				}
-				compareNode(t, expected, p.Expression())
+				compareNodes(t, b.NodeAt(refs[idx]), p.Expression())
+				idx++
+			}
+			assert.NoError(t, p.Error())
+			if idx < len(refs) {
+				t.Fatalf("parser produced %d expressions, expected %d", idx, len(refs))
 			}
 		})
 	}
 }
 
-type (
-	astNode struct {
-		Kind     Kind
-		Data     []byte
-		Children []astNode
-		Comment  *astNode
-	}
-)
-
-func compareNode(t *testing.T, e astNode, n *Node) {
-	t.Helper()
-	assert.Equal(t, e.Kind, n.Kind)
-	assert.Equal(t, e.Data, n.Data)
-
-	compareIterator(t, e.Children, n.Children())
-
-	if e.Comment != nil {
-		c := n.Comment()
-		if c == nil {
-			t.Fatal("expected comment but got nil")
-		}
-		compareNode(t, *e.Comment, c)
-	} else if n.Comment() != nil {
-		t.Fatalf("unexpected comment: %s", n.Comment().Data)
-	}
-}
-
-func compareIterator(t *testing.T, expected []astNode, actual Iterator) {
-	t.Helper()
-	idx := 0
-
-	for actual.Next() {
-		n := actual.Node()
-
-		if idx >= len(expected) {
-			t.Fatal("extra child in actual tree")
-		}
-		e := expected[idx]
-
-		compareNode(t, e, n)
-
-		idx++
-	}
-
-	if idx < len(expected) {
-		t.Fatal("missing children in actual", "idx =", idx, "expected =", len(expected))
-	}
-}
-
 //nolint:funlen
-func TestParser_AST(t *testing.T) {
+func TestParser_AST_ExtraCoverage(t *testing.T) {
 	examples := []struct {
 		desc  string
 		input string
-		ast   astNode
-		err   bool
+		build func(b *Builder) Reference
 	}{
 		{
-			desc:  "simple string assignment",
-			input: `A = "hello"`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: String,
-						Data: []byte(`hello`),
-					},
-					{
-						Kind: Key,
-						Data: []byte(`A`),
-					},
-				},
+			desc:  "multiline literal string with CRLF",
+			input: "key = '''\r\nfoo\r\nbar'''",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: String, Data: []byte("foo\r\nbar")}),
+					tree(b, Node{Kind: Key, Data: []byte("key")}),
+				)
 			},
 		},
 		{
-			desc:  "simple bool assignment",
-			input: `A = true`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: Bool,
-						Data: []byte(`true`),
-					},
-					{
-						Kind: Key,
-						Data: []byte(`A`),
-					},
-				},
+			desc:  "multiline basic string with CRLF",
+			input: "key = \"\"\"\r\nfoo\"\"\"",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: String, Data: []byte("foo")}),
+					tree(b, Node{Kind: Key, Data: []byte("key")}),
+				)
 			},
 		},
 		{
-			desc:  "array of strings",
-			input: `A = ["hello", ["world", "again"]]`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: Array,
-						Children: []astNode{
-							{
-								Kind: String,
-								Data: []byte(`hello`),
-							},
-							{
-								Kind: Array,
-								Children: []astNode{
-									{
-										Kind: String,
-										Data: []byte(`world`),
-									},
-									{
-										Kind: String,
-										Data: []byte(`again`),
-									},
-								},
-							},
-						},
-					},
-					{
-						Kind: Key,
-						Data: []byte(`A`),
-					},
-				},
+			desc:  "multiline basic string escape sequences",
+			input: "key = \"\"\"\n\\b\\f\\r\\t\\e\\x41\"\"\"",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: String, Data: []byte("\b\f\r\t\x1BA")}),
+					tree(b, Node{Kind: Key, Data: []byte("key")}),
+				)
 			},
 		},
 		{
-			desc:  "array of arrays of strings",
-			input: `A = ["hello", "world"]`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: Array,
-						Children: []astNode{
-							{
-								Kind: String,
-								Data: []byte(`hello`),
-							},
-							{
-								Kind: String,
-								Data: []byte(`world`),
-							},
-						},
-					},
-					{
-						Kind: Key,
-						Data: []byte(`A`),
-					},
-				},
+			desc:  "inline table comma on separate line with comment",
+			input: "t = {\n  a = 1\n  , # mid\n  b = 2\n}",
+			build: func(b *Builder) Reference {
+				kv1 := tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: Integer, Data: []byte("1")}),
+					tree(b, Node{Kind: Key, Data: []byte("a")}),
+				)
+				comment := tree(b, Node{Kind: Comment, Data: []byte("# mid")})
+				kv2 := tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: Integer, Data: []byte("2")}),
+					tree(b, Node{Kind: Key, Data: []byte("b")}),
+				)
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: InlineTable}, kv1, comment, kv2),
+					tree(b, Node{Kind: Key, Data: []byte("t")}),
+				)
 			},
 		},
 		{
-			desc:  "inline table",
-			input: `name = { first = "Tom", last = "Preston-Werner" }`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: InlineTable,
-						Children: []astNode{
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Tom`)},
-									{Kind: Key, Data: []byte(`first`)},
-								},
-							},
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Preston-Werner`)},
-									{Kind: Key, Data: []byte(`last`)},
-								},
-							},
-						},
-					},
-					{
-						Kind: Key,
-						Data: []byte(`name`),
-					},
-				},
+			desc:  "inline table trailing comma on separate line",
+			input: "t = {\n  a = 1\n  ,\n}",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: InlineTable},
+						tree(b, Node{Kind: KeyValue},
+							tree(b, Node{Kind: Integer, Data: []byte("1")}),
+							tree(b, Node{Kind: Key, Data: []byte("a")}),
+						),
+					),
+					tree(b, Node{Kind: Key, Data: []byte("t")}),
+				)
 			},
 		},
 		{
-			desc:  "multiline inline table",
-			input: "name = {\n  first = \"Tom\",\n  last = \"Preston-Werner\"\n}",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: InlineTable,
-						Children: []astNode{
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Tom`)},
-									{Kind: Key, Data: []byte(`first`)},
-								},
-							},
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Preston-Werner`)},
-									{Kind: Key, Data: []byte(`last`)},
-								},
-							},
-						},
-					},
-					{
-						Kind: Key,
-						Data: []byte(`name`),
-					},
-				},
+			desc:  "array comma on separate line with comment",
+			input: "a = [\n  1\n  , # mid\n  2\n]",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: Array},
+						tree(b, Node{Kind: Integer, Data: []byte("1")}),
+						tree(b, Node{Kind: Comment, Data: []byte("# mid")}),
+						tree(b, Node{Kind: Integer, Data: []byte("2")}),
+					),
+					tree(b, Node{Kind: Key, Data: []byte("a")}),
+				)
 			},
 		},
 		{
-			desc:  "inline table with trailing comma",
-			input: `name = { first = "Tom", last = "Preston-Werner", }`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: InlineTable,
-						Children: []astNode{
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Tom`)},
-									{Kind: Key, Data: []byte(`first`)},
-								},
-							},
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Preston-Werner`)},
-									{Kind: Key, Data: []byte(`last`)},
-								},
-							},
-						},
-					},
-					{
-						Kind: Key,
-						Data: []byte(`name`),
-					},
-				},
-			},
-		},
-		{
-			desc:  "empty inline table with newline",
-			input: "name = {\n}",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind:     InlineTable,
-						Children: nil,
-					},
-					{
-						Kind: Key,
-						Data: []byte(`name`),
-					},
-				},
+			desc:  "array trailing comma on separate line",
+			input: "a = [\n  1\n  ,\n]",
+			build: func(b *Builder) Reference {
+				return tree(b, Node{Kind: KeyValue},
+					tree(b, Node{Kind: Array},
+						tree(b, Node{Kind: Integer, Data: []byte("1")}),
+					),
+					tree(b, Node{Kind: Key, Data: []byte("a")}),
+				)
 			},
 		},
 	}
@@ -428,15 +181,36 @@ func TestParser_AST(t *testing.T) {
 	for _, e := range examples {
 		e := e
 		t.Run(e.desc, func(t *testing.T) {
-			p := Parser{}
+			var p Parser
+			p.KeepComments = true
 			p.Reset([]byte(e.input))
 			p.NextExpression()
-			err := p.Error()
-			if e.err {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				compareNode(t, e.ast, p.Expression())
+			assert.NoError(t, p.Error())
+
+			b := NewBuilder()
+			ref := e.build(b)
+			compareNodes(t, b.NodeAt(ref), p.Expression())
+		})
+	}
+}
+
+func TestParser_Invalid(t *testing.T) {
+	names := make([]string, 0, len(testgenInvalidCases))
+	for name := range testgenInvalidCases {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			input := testgenInvalidCases[name]
+
+			var p Parser
+			p.Reset([]byte(input))
+			for p.NextExpression() {
+			}
+			if p.Error() == nil {
+				t.Skip("no syntax error (semantic validation is done by the unmarshaler)")
 			}
 		})
 	}
@@ -476,65 +250,6 @@ func BenchmarkParseBasicStringsEasy(b *testing.B) {
 
 			for i := 0; i < b.N; i++ {
 				_, _, _, _ = p.parseBasicString(input)
-			}
-		})
-	}
-}
-
-func TestParser_AST_DateTimes(t *testing.T) {
-	examples := []struct {
-		desc  string
-		input string
-		kind  Kind
-		err   bool
-	}{
-		{
-			desc:  "offset-date-time with delim 'T' and UTC offset",
-			input: `2021-07-21T12:08:05Z`,
-			kind:  DateTime,
-		},
-		{
-			desc:  "offset-date-time with space delim and +8hours offset",
-			input: `2021-07-21 12:08:05+08:00`,
-			kind:  DateTime,
-		},
-		{
-			desc:  "local-date-time with nano second",
-			input: `2021-07-21T12:08:05.666666666`,
-			kind:  LocalDateTime,
-		},
-		{
-			desc:  "local-date-time",
-			input: `2021-07-21T12:08:05`,
-			kind:  LocalDateTime,
-		},
-		{
-			desc:  "local-date",
-			input: `2021-07-21`,
-			kind:  LocalDate,
-		},
-	}
-
-	for _, e := range examples {
-		e := e
-		t.Run(e.desc, func(t *testing.T) {
-			p := Parser{}
-			p.Reset([]byte(`A = ` + e.input))
-			p.NextExpression()
-			err := p.Error()
-			if e.err {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-
-				expected := astNode{
-					Kind: KeyValue,
-					Children: []astNode{
-						{Kind: e.kind, Data: []byte(e.input)},
-						{Kind: Key, Data: []byte(`A`)},
-					},
-				}
-				compareNode(t, expected, p.Expression())
 			}
 		})
 	}
@@ -787,182 +502,4 @@ func ExampleParser() {
 	// hello -> (String) world
 	// Expression: KeyValue
 	// value -> (Integer) 42
-}
-
-//nolint:funlen
-func TestParser_TrailingComments(t *testing.T) {
-	examples := []struct {
-		desc  string
-		input string
-		ast   astNode
-	}{
-		{
-			desc:  "keyvalue trailing comment",
-			input: `key = "value" # trailer`,
-			ast: astNode{
-				Kind: KeyValue,
-				Comment: &astNode{
-					Kind: Comment,
-					Data: []byte(`# trailer`),
-				},
-				Children: []astNode{
-					{Kind: String, Data: []byte(`value`)},
-					{Kind: Key, Data: []byte(`key`)},
-				},
-			},
-		},
-		{
-			desc:  "keyvalue no trailing comment",
-			input: `key = "value"`,
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{Kind: String, Data: []byte(`value`)},
-					{Kind: Key, Data: []byte(`key`)},
-				},
-			},
-		},
-		{
-			desc:  "table trailing comment",
-			input: `[table] # trailer`,
-			ast: astNode{
-				Kind: Table,
-				Comment: &astNode{
-					Kind: Comment,
-					Data: []byte(`# trailer`),
-				},
-				Children: []astNode{
-					{Kind: Key, Data: []byte(`table`)},
-				},
-			},
-		},
-		{
-			desc:  "array table trailing comment",
-			input: `[[products]] # trailer`,
-			ast: astNode{
-				Kind: ArrayTable,
-				Comment: &astNode{
-					Kind: Comment,
-					Data: []byte(`# trailer`),
-				},
-				Children: []astNode{
-					{Kind: Key, Data: []byte(`products`)},
-				},
-			},
-		},
-		{
-			desc:  "array element trailing comments",
-			input: "key = [\n  1, # first\n  2, # second\n  3 # third\n]",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: Array,
-						Children: []astNode{
-							{Kind: Integer, Data: []byte(`1`), Comment: &astNode{Kind: Comment, Data: []byte(`# first`)}},
-							{Kind: Integer, Data: []byte(`2`), Comment: &astNode{Kind: Comment, Data: []byte(`# second`)}},
-							{Kind: Integer, Data: []byte(`3`), Comment: &astNode{Kind: Comment, Data: []byte(`# third`)}},
-						},
-					},
-					{Kind: Key, Data: []byte(`key`)},
-				},
-			},
-		},
-		{
-			desc:  "array opening bracket trailing comment",
-			input: "key = [ # bracket comment\n  1,\n  2\n]",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: Array,
-						Comment: &astNode{
-							Kind: Comment,
-							Data: []byte(`# bracket comment`),
-						},
-						Children: []astNode{
-							{Kind: Integer, Data: []byte(`1`)},
-							{Kind: Integer, Data: []byte(`2`)},
-						},
-					},
-					{Kind: Key, Data: []byte(`key`)},
-				},
-			},
-		},
-		{
-			desc:  "inline table keyval trailing comments",
-			input: "name = {\n  first = \"Tom\", # c1\n  last = \"Werner\" # c2\n}",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: InlineTable,
-						Children: []astNode{
-							{
-								Kind: KeyValue,
-								Comment: &astNode{
-									Kind: Comment,
-									Data: []byte(`# c1`),
-								},
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Tom`)},
-									{Kind: Key, Data: []byte(`first`)},
-								},
-							},
-							{
-								Kind: KeyValue,
-								Comment: &astNode{
-									Kind: Comment,
-									Data: []byte(`# c2`),
-								},
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Werner`)},
-									{Kind: Key, Data: []byte(`last`)},
-								},
-							},
-						},
-					},
-					{Kind: Key, Data: []byte(`name`)},
-				},
-			},
-		},
-		{
-			desc:  "inline table opening brace trailing comment",
-			input: "name = { # brace comment\n  first = \"Tom\"\n}",
-			ast: astNode{
-				Kind: KeyValue,
-				Children: []astNode{
-					{
-						Kind: InlineTable,
-						Comment: &astNode{
-							Kind: Comment,
-							Data: []byte(`# brace comment`),
-						},
-						Children: []astNode{
-							{
-								Kind: KeyValue,
-								Children: []astNode{
-									{Kind: String, Data: []byte(`Tom`)},
-									{Kind: Key, Data: []byte(`first`)},
-								},
-							},
-						},
-					},
-					{Kind: Key, Data: []byte(`name`)},
-				},
-			},
-		},
-	}
-
-	for _, e := range examples {
-		e := e
-		t.Run(e.desc, func(t *testing.T) {
-			p := Parser{KeepComments: true}
-			p.Reset([]byte(e.input))
-			p.NextExpression()
-			err := p.Error()
-			assert.NoError(t, err)
-			compareNode(t, e.ast, p.Expression())
-		})
-	}
 }
